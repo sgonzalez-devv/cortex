@@ -1,6 +1,6 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, MessageEvent } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { Observable, Subject } from 'rxjs';
 import OpenAI from 'openai';
 import { ConfigService } from '@nestjs/config';
@@ -151,7 +151,7 @@ ${contextBlock}`,
 
   private async getDocumentNames(ids: string[]): Promise<Record<string, string>> {
     if (!ids.length) return {};
-    const docs = await this.documents.findByIds(ids);
+    const docs = await this.documents.find({ where: { id: In(ids) } });
     return Object.fromEntries(docs.map((d) => [d.id, d.name]));
   }
 }
