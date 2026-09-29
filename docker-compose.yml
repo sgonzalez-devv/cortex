@@ -1,0 +1,65 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: cortex_dev
+      POSTGRES_DB: cortex
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3,sqs,secretsmanager
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh
+
+  api:
+    build: { context: ./apps/api, target: build }
+    command: npm run start:dev
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://cortex:cortex_dev@postgres:5432/cortex
+      JWT_SECRET: dev_secret_change_in_prod
+      NODE_ENV: development
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      S3_DOCUMENTS_BUCKET: cortex-documents-dev
+      SQS_INGESTION_QUEUE_URL: http://localhost:4566/000000000000/cortex-ingestion
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      - ./apps/api/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build: { context: ./apps/web, target: deps }
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    volumes:
+      - ./apps/web/src:/app/src
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:

@@ -1,0 +1,101 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: { group: deploy-production, cancel-in-progress: false }
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push API
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            --cache-from $REGISTRY/cortex-api:latest \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t $REGISTRY/cortex-api:$TAG \
+            -t $REGISTRY/cortex-api:latest \
+            apps/api
+          docker push $REGISTRY/cortex-api:$TAG
+          docker push $REGISTRY/cortex-api:latest
+
+      - name: Build & push Worker
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t $REGISTRY/cortex-worker:$TAG \
+            -t $REGISTRY/cortex-worker:latest \
+            workers/document-processor
+          docker push $REGISTRY/cortex-worker:$TAG
+          docker push $REGISTRY/cortex-worker:latest
+
+      - name: Deploy Lambda worker
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          aws lambda update-function-code \
+            --function-name cortex-worker-production \
+            --image-uri $REGISTRY/cortex-worker:$TAG \
+            --publish
+
+      - name: Deploy ECS API
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition cortex-api-production \
+            --query taskDefinition)
+
+          NEW_TASK_DEF=$(echo $TASK_DEF | python3 -c "
+          import json,sys
+          td = json.load(sys.stdin)
+          for c in td['containerDefinitions']:
+              if c['name'] == 'api':
+                  c['image'] = '${REGISTRY}/cortex-api:${TAG}'
+          for k in ['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy']:
+              td.pop(k, None)
+          print(json.dumps(td))")
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          aws ecs update-service \
+            --cluster cortex-production \
+            --service cortex-api \
+            --task-definition $NEW_ARN \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster cortex-production \
+            --services cortex-api
